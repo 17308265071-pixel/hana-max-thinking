@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "hana-max-thinking",
   "name": "Max Thinking",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Force every chat model in every session and channel (desktop / phone / bridge) to run at its highest supported thinking level. Enforced per turn through the Pi SDK runtime API and synced into session metadata so the frontend thinking selector reflects it immediately.",
   "minAppVersion": "0.158.0",
   "trust": "full-access",
