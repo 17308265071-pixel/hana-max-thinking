@@ -4,6 +4,12 @@
 
 **作者：2990927961** · Hana 插件市场 ID：`hana-max-thinking`
 
+## 兼容性说明（v0.1.7）
+
+- **HanaAgent ≥ 0.449.0**：`thinking_status` 作为原生工具直接调用（capability 本地命名空间，免审批）。
+- **HanaAgent < 0.449.0**：插件工具可能被延迟挂载到 mcp_call 桥——此时经 `mcp_call { server: "hana-max-thinking", tool: "hana-max-thinking_thinking_status" }` 调用（解析器检测到桥接帧时自动切换目录命名空间 capability）。
+- **任何版本通用的兜底**：直接 read `${HANA_HOME}/plugin-data/hana-max-thinking/enforce.log`（JSONL），运行时真实等级以它为准。SKILL.md 已向 agent 注入这套"直调 → 旧版 mcp_call → 日志兜底"的三段式约定。
+
 ## 解决什么痛点
 
 GLM 5.3 Flash / DeepSeek V4 Flash 等模型的回答质量与**思考链（thinking）强相关**：

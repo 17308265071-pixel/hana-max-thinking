@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { getState, getDiagnostics, getLogFile } from "../state.js";
 
 export const name = "thinking_status";
-export const description = "hana-max-thinking 插件状态查询：报告思考等级强制配置、degraded 状态、最近按会话的等级应用记录（before→after）与文件日志尾部。调用方式：mcp_call { server: \"hana-max-thinking\", tool: \"hana-max-thinking_thinking_status\", arguments: {} }。当用户询问思考等级 / thinking level / 推理档位 / Max / 深度推理状态时调用本工具，不要查询 MCP 连接器。";
+export const description = "hana-max-thinking 插件状态查询：报告思考等级强制配置、degraded 状态、最近按会话的等级应用记录（before→after）与文件日志尾部。HanaAgent >= 0.449 直接作为原生工具调用（无参数）；旧版本 < 0.449 可经 mcp_call { server: \"hana-max-thinking\", tool: \"hana-max-thinking_thinking_status\" } 调用；均失败则读 plugin-data/hana-max-thinking/enforce.log。当用户询问思考等级 / thinking level / 推理档位 / Max / 深度推理状态时调用本工具。";
 export const parameters = { type: "object", properties: {} };
 
 export const sessionPermission = {
@@ -17,29 +17,25 @@ export const sessionPermission = {
   // rejected with TOOL_INVOCATION_RESOLVER_FAILED. kind: "read" keeps this
   // tool approval-free.
   //
-  // The capability namespace differs by validation context (an upstream gap
-  // for plugin tools used as deferred builtins):
-  // - deferred path: the descriptor is normalized against the mcp_call bridge
-  //   tool, so the registered catalog delegate accepts only
-  //   <catalog entry name>.<action> = "hana-max-thinking_thinking_status.status"
-  // - direct (live) load: the descriptor is normalized against this tool,
-  //   where invocationToolName strips the plugin prefix, so the capability
-  //   must be <local name>.<action> = "thinking_status.status"
-  // The resolver is synchronous and context-free by contract; the call stack
-  // is the only path discriminator available (the bridge's resolver frame lives
-  // in tool-catalog-bridge). Default to the deferred/bridge form — deferred
-  // sessions are the common case once any connector is enabled — and use the
-  // local form only when the direct wrapper is clearly on the stack.
+  // The descriptor capability namespace depends on the validation context of
+  // the executing tool (an upstream gap for plugin tools):
+  // - direct (live) load: validated against this tool with the plugin prefix
+  //   stripped -> capability must be "thinking_status.status"
+  // - deferred bridge (older hosts): validated against the mcp_call tool with a
+  //   catalog delegate that accepts "hana-max-thinking_thinking_status.status"
+  // On Hana >= 0.449.0 plugin tools are live-loaded (direct semantics) and the
+  // deferred bridge no longer routes plugin tools, so the LOCAL form is the
+  // correct default. Only switch to the catalog form when a bridge frame is
+  // positively present on the stack; opaque stacks stay on the local form.
   resolveInvocation: () => {
-    let capability = "hana-max-thinking_thinking_status.status";
+    let capability = "thinking_status.status";
     try {
       const stack = new Error().stack || "";
-      if (/session-permission-wrapper|resolveToolInvocationPermission/i.test(stack)
-        && !/tool-catalog-bridge/i.test(stack)) {
-        capability = "thinking_status.status";
+      if (/tool-catalog-bridge|resolveBuiltinInvocation/i.test(stack)) {
+        capability = "hana-max-thinking_thinking_status.status";
       }
     } catch {
-      // Stack inspection unavailable: keep the deferred default.
+      // Stack inspection unavailable: keep the local form.
     }
     return { action: "status", kind: "read", capability };
   },
