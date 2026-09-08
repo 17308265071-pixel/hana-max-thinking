@@ -1,4 +1,4 @@
-// hana-max-thinking lifecycle plugin (v0.1.2).
+// hana-max-thinking lifecycle plugin (v0.1.8).
 //
 // Responsibilities:
 // 1. Sync ctx.config (manifest configuration schema) into the shared state
@@ -14,6 +14,11 @@
 // 4. File log (JSONL under ctx.dataDir) for every action, plus a slow
 //    self-heal interval so config edits and missed events still apply after
 //    future app updates.
+//
+// IMPORTANT: the plugin install response is JSON.stringify({...entry}) and the
+// entry carries this instance. Timer objects (setTimeout/setInterval returns)
+// hold circular _idlePrev/_idleNext links, so they must NEVER be stored on
+// instance properties. All timers live in the onload closure instead.
 
 import path from "node:path";
 import fs from "node:fs";
@@ -81,10 +86,12 @@ export default class HanaMaxThinkingPlugin {
     const register = (disposable) => {
       if (typeof this.register === "function") this.register(disposable);
     };
-    this._ctx = ctx;
-    this._timers = [];
-    this._sweepBusy = false;
-    this._pendingSweepTimer = null;
+    // Closure-scoped runtime state: JSON-safe on the instance (no timers).
+    const timers = [];
+    let pendingSweepTimer = null;
+    let sweepBusy = false;
+    let sweepTimer = null;
+
     initLogging(ctx.dataDir);
     appendLog("lifecycle", "onload start", { dataDir: ctx.dataDir || null, pluginId: ctx.pluginId || null });
 
@@ -109,7 +116,9 @@ export default class HanaMaxThinkingPlugin {
     } catch (err) {
       appendLog("lifecycle", `config event subscribe unavailable: ${err?.message || err}`);
     }
-    this._pushTimer(setInterval(() => void this._sync(), 60_000));
+    const cfgTimer = setInterval(() => void this._sync(), 60_000);
+    if (typeof cfgTimer?.unref === "function") cfgTimer.unref();
+    timers.push(cfgTimer);
 
     // Session/channel lifecycle events.
     try {
@@ -123,24 +132,24 @@ export default class HanaMaxThinkingPlugin {
 
     // Initial sweep (delayed so the server finishes wiring up), then a slow
     // self-heal sweep.
-    this._pushTimer(setTimeout(() => void this._sweep("startup"), SWEEP_STARTUP_DELAY_MS));
-    this._pushTimer(setInterval(() => void this._sweep("interval"), SWEEP_INTERVAL_MS));
+    const initialTimer = setTimeout(() => void this._sweep("startup"), SWEEP_STARTUP_DELAY_MS);
+    if (typeof initialTimer?.unref === "function") initialTimer.unref();
+    timers.push(initialTimer);
+    sweepTimer = setInterval(() => void this._sweep("interval"), SWEEP_INTERVAL_MS);
+    if (typeof sweepTimer?.unref === "function") sweepTimer.unref();
+    timers.push(sweepTimer);
 
     register(() => {
-      for (const timer of this._timers) {
+      for (const timer of timers) {
         clearTimeout(timer);
         clearInterval(timer);
       }
-      this._timers = [];
+      timers.length = 0;
+      if (pendingSweepTimer) clearTimeout(pendingSweepTimer);
     });
 
     appendLog("lifecycle", "loaded: enforcement active for all sessions and channels");
     ctx.log?.info?.("[hana-max-thinking] lifecycle loaded: every session/channel will run at the highest supported thinking level");
-  }
-
-  _pushTimer(timer) {
-    if (typeof timer?.unref === "function") timer.unref();
-    this._timers.push(timer);
   }
 
   _onBusEvent(event, sessionPath) {
