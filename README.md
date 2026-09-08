@@ -23,7 +23,7 @@ GLM 5.3 Flash / DeepSeek V4 Flash 等模型的回答质量与**思考链（think
 
 ## 安装
 
-1. 下载 [Release v0.1.6](https://github.com/17308265071-pixel/hana-max-thinking/releases/download/v0.1.6/hana-max-thinking.zip)
+1. 下载 [Releases 页面](https://github.com/17308265071-pixel/hana-max-thinking/releases)（选择最新版本，下载 hana-max-thinking.zip）
 2. Hana 设置 → 插件 → 拖入 zip 安装（或解压到 ~/.hanako/plugins/ 后重启）
 3. 打开 Max Thinking 的全权（full-access）开关
 
