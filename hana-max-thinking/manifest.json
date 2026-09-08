@@ -1,0 +1,58 @@
+{
+  "manifestVersion": 1,
+  "id": "hana-max-thinking",
+  "name": "Max Thinking",
+  "version": "0.1.6",
+  "description": "Force every chat model in every session and channel (desktop / phone / bridge) to run at its highest supported thinking level. Enforced per turn through the Pi SDK runtime API and synced into session metadata so the frontend thinking selector reflects it immediately.",
+  "minAppVersion": "0.158.0",
+  "trust": "full-access",
+  "activationEvents": [
+    "onStartup"
+  ],
+  "capabilities": [
+    "session"
+  ],
+  "contributes": {
+    "configuration": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "title": "启用最高思考等级强制"
+        },
+        "targetLevel": {
+          "type": "string",
+          "enum": [
+            "xhigh",
+            "high"
+          ],
+          "default": "xhigh",
+          "title": "目标思考等级（xhigh=最高，Hana 界面显示为“最高/Max”；不支持该档的模型自动落到它支持的最高档）"
+        },
+        "enforceEveryTurn": {
+          "type": "boolean",
+          "default": true,
+          "title": "每一轮都重新强制（自动纠正手动下调、模型切换后的回落）"
+        },
+        "syncSessionMeta": {
+          "type": "boolean",
+          "default": true,
+          "title": "前端适配：把强制等级写回会话元数据，思考档位选择器立即显示被强制的档位"
+        },
+        "respectManualChoice": {
+          "type": "boolean",
+          "default": false,
+          "title": "尊重手动下调（开启后，用户在界面上手动调低档位时 30 分钟内不再强制该会话）"
+        },
+        "excludeModels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "title": "排除的模型（模型 id 子串匹配，支持结尾 * 作为前缀通配）"
+        }
+      }
+    }
+  }
+}

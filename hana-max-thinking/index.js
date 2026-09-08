@@ -1,0 +1,302 @@
+// hana-max-thinking lifecycle plugin (v0.1.2).
+//
+// Responsibilities:
+// 1. Sync ctx.config (manifest configuration schema) into the shared state
+//    mirror that the Pi SDK extension reads at event time.
+// 2. Frontend adaptation: write the enforced level into session metadata
+//    through the bus session:update capability, so the frontend thinking
+//    selector reflects the forced level immediately and clicking a lower tier
+//    gets corrected within seconds.
+// 3. Creation-time enforcement: on session_created, apply to that session at
+//    once. Channels are created outside the bus (agent-executor), so a
+//    filesystem sweep discovers phone sessions (old and new) and applies to
+//    them by legacy sessionPath.
+// 4. File log (JSONL under ctx.dataDir) for every action, plus a slow
+//    self-heal interval so config edits and missed events still apply after
+//    future app updates.
+
+import path from "node:path";
+import fs from "node:fs";
+import {
+  appendLog,
+  getState,
+  initLogging,
+  isManualHold,
+  levelBelowTarget,
+  markApplied,
+  markManualHold,
+  recentlyApplied,
+  setState,
+} from "./state.js";
+
+// The level sent over the bus. Hana normalizes it per model on the server
+// (max -> xhigh -> high when the model lacks a higher tier).
+const BUS_LEVEL = "max";
+const APPLY_THROTTLE_MS = 5 * 60_000;
+const PHONE_THROTTLE_MS = 30 * 60_000;
+const SWEEP_INTERVAL_MS = 10 * 60_000;
+const SWEEP_STARTUP_DELAY_MS = 4_000;
+
+function fileExistsSafe(file) {
+  try {
+    return fs.statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function dirExistsSafe(dir) {
+  try {
+    return fs.statSync(dir).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+async function readConfig(ctx) {
+  const config = ctx?.config;
+  const get = async (key, fallback) => {
+    try {
+      const value = await config?.get?.(key);
+      return value === undefined ? fallback : value;
+    } catch {
+      // Config store API changed across an app update: fall back to the
+      // default rather than breaking enforcement.
+      return fallback;
+    }
+  };
+  return {
+    enabled: await get("enabled", true),
+    targetLevel: await get("targetLevel", "xhigh"),
+    enforceEveryTurn: await get("enforceEveryTurn", true),
+    syncSessionMeta: await get("syncSessionMeta", true),
+    respectManualChoice: await get("respectManualChoice", false),
+    excludeModels: await get("excludeModels", []),
+  };
+}
+
+export default class HanaMaxThinkingPlugin {
+  async onload() {
+    const ctx = this.ctx;
+    const register = (disposable) => {
+      if (typeof this.register === "function") this.register(disposable);
+    };
+    this._ctx = ctx;
+    this._timers = [];
+    this._sweepBusy = false;
+    this._pendingSweepTimer = null;
+    initLogging(ctx.dataDir);
+    appendLog("lifecycle", "onload start", { dataDir: ctx.dataDir || null, pluginId: ctx.pluginId || null });
+
+    this._sync = async () => {
+      try {
+        setState(await readConfig(ctx));
+      } catch (err) {
+        appendLog("lifecycle", `config sync failed: ${err?.message || err}`);
+      }
+    };
+    await this._sync();
+
+    // Re-sync when the user edits plugin settings; slow fallback interval in
+    // case a future update renames the change event.
+    try {
+      const unsub = ctx.bus?.subscribe?.((event) => {
+        if (event?.type === "plugin_config_changed" && event?.pluginId === ctx.pluginId) {
+          void this._sync();
+        }
+      });
+      if (typeof unsub === "function") register(unsub);
+    } catch (err) {
+      appendLog("lifecycle", `config event subscribe unavailable: ${err?.message || err}`);
+    }
+    this._pushTimer(setInterval(() => void this._sync(), 60_000));
+
+    // Session/channel lifecycle events.
+    try {
+      const unsubEvents = ctx.bus?.subscribe?.((event, sessionPath) => {
+        this._onBusEvent(event, sessionPath);
+      });
+      if (typeof unsubEvents === "function") register(unsubEvents);
+    } catch (err) {
+      appendLog("lifecycle", `bus subscribe unavailable: ${err?.message || err}`);
+    }
+
+    // Initial sweep (delayed so the server finishes wiring up), then a slow
+    // self-heal sweep.
+    this._pushTimer(setTimeout(() => void this._sweep("startup"), SWEEP_STARTUP_DELAY_MS));
+    this._pushTimer(setInterval(() => void this._sweep("interval"), SWEEP_INTERVAL_MS));
+
+    register(() => {
+      for (const timer of this._timers) {
+        clearTimeout(timer);
+        clearInterval(timer);
+      }
+      this._timers = [];
+    });
+
+    appendLog("lifecycle", "loaded: enforcement active for all sessions and channels");
+    ctx.log?.info?.("[hana-max-thinking] lifecycle loaded: every session/channel will run at the highest supported thinking level");
+  }
+
+  _pushTimer(timer) {
+    if (typeof timer?.unref === "function") timer.unref();
+    this._timers.push(timer);
+  }
+
+  _onBusEvent(event, sessionPath) {
+    const state = getState();
+    if (!state.enabled) return;
+    if (event?.type === "session_created") {
+      // Immediate enforcement for brand-new sessions/channels.
+      const created = event?.session || {};
+      const sessionId = created.sessionId || created.sessionRef?.sessionId || null;
+      const createdPath = created.sessionPath || created.path || sessionPath || null;
+      void this._applyNow({ sessionId, sessionPath: createdPath }, "session_created");
+      return;
+    }
+    if (event?.type === "session_metadata_updated") {
+      const level = event?.metadata?.thinkingLevel;
+      if (typeof level !== "string") return;
+      const key = sessionPath || event?.sessionPath || null;
+      if (!key) return;
+      if (recentlyApplied(key, 15_000)) return; // echo of our own write
+      if (state.respectManualChoice) {
+        markManualHold(key);
+        appendLog("lifecycle", "manual choice respected (hold 30m)", { session: key, level });
+        return;
+      }
+      if (!levelBelowTarget(level)) return;
+      // Direct targeted fix, throttle-exempt: clicking a lower tier in the
+      // frontend is corrected within this turn.
+      void this._applyNow({ sessionPath: key }, "metadata_downgrade", { ignoreThrottle: true });
+    }
+  }
+
+  async _applyNow(target, reason, { ignoreThrottle = false } = {}) {
+    const key = target.sessionId || target.sessionPath;
+    if (!key) return false;
+    if (!ignoreThrottle && (recentlyApplied(key, APPLY_THROTTLE_MS) || isManualHold(String(key)))) return false;
+    try {
+      const payload = { thinkingLevel: BUS_LEVEL };
+      if (target.sessionId) {
+        payload.sessionId = target.sessionId;
+        if (target.sessionPath) payload.sessionRef = { sessionId: target.sessionId, sessionPath: target.sessionPath };
+      } else {
+        payload.sessionPath = target.sessionPath;
+      }
+      const result = await this._ctx.bus.request("session:update", payload);
+      markApplied([key, result?.sessionId, result?.session?.path]);
+      appendLog("lifecycle", "session:update applied", {
+        session: String(key),
+        level: BUS_LEVEL,
+        reason,
+        ok: result?.ok !== false,
+      });
+      return true;
+    } catch (err) {
+      appendLog("lifecycle", `session:update failed (${reason})`, {
+        session: String(key),
+        error: err?.message || String(err),
+      });
+      return false;
+    }
+  }
+
+  async _sweep(reason) {
+    const state = getState();
+    if (!state.enabled || !state.syncSessionMeta || this._sweepBusy) return;
+    this._sweepBusy = true;
+    try {
+      await this._sweepDesktopSessions(reason);
+      await this._sweepPhoneSessions(reason);
+    } catch (err) {
+      appendLog("lifecycle", `sweep failed (${reason}): ${err?.message || err}`);
+    } finally {
+      this._sweepBusy = false;
+    }
+  }
+
+  async _sweepDesktopSessions(reason) {
+    const ctx = this._ctx;
+    if (typeof ctx.bus?.request !== "function") return;
+    let list = [];
+    try {
+      const result = await ctx.bus.request("session:list", { includePluginPrivate: true });
+      list = Array.isArray(result?.sessions) ? result.sessions : (Array.isArray(result) ? result : []);
+    } catch (err) {
+      appendLog("lifecycle", `session:list failed (${reason}): ${err?.message || err}`);
+      return;
+    }
+    let applied = 0;
+    for (const item of list) {
+      if (!item || item.agentDeleted) continue;
+      const owner = item?.ownerPluginId;
+      if (owner && owner !== ctx.pluginId) continue;
+      const sessionId = item?.sessionId || null;
+      const sessionPath = item?.path || item?.sessionPath || null;
+      if (!sessionId && !sessionPath) continue;
+      if (recentlyApplied(sessionId || sessionPath, APPLY_THROTTLE_MS)) continue;
+      if (isManualHold(String(sessionId || sessionPath))) continue;
+      const target = sessionId ? { sessionId } : { sessionPath };
+      const ok = await this._applyNow(target, reason);
+      if (ok) applied += 1;
+    }
+    appendLog("lifecycle", `sweep(${reason}) done`, { total: list.length, applied });
+  }
+
+  // Phone/channel sessions are domain "phone" and excluded from session:list,
+  // so discover them on disk under ${HANA_HOME}/agents/<agent>/phone/sessions
+  // and apply through the legacy sessionPath input.
+  async _sweepPhoneSessions(reason) {
+    const agentsDir = this._agentsDir();
+    if (!agentsDir || !dirExistsSafe(agentsDir)) {
+      appendLog("lifecycle", `phone sweep skipped (${reason}): agents dir unavailable`);
+      return;
+    }
+    let agentDirs;
+    try {
+      agentDirs = fs.readdirSync(agentsDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => path.join(agentsDir, entry.name));
+    } catch (err) {
+      appendLog("lifecycle", `phone scan failed (${reason}): ${err?.message || err}`);
+      return;
+    }
+    let applied = 0;
+    for (const agentDir of agentDirs) {
+      const sessionsDir = path.join(agentDir, "phone", "sessions");
+      let convDirs;
+      try {
+        convDirs = fs.readdirSync(sessionsDir, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => path.join(sessionsDir, entry.name));
+      } catch {
+        continue; // agent without phone sessions
+      }
+      for (const convDir of convDirs) {
+        const phoneJsonl = path.join(convDir, "phone.jsonl");
+        if (!fileExistsSafe(phoneJsonl)) continue;
+        if (recentlyApplied(phoneJsonl, PHONE_THROTTLE_MS)) continue;
+        const ok = await this._applyNow({ sessionPath: phoneJsonl }, "phone");
+        if (ok) applied += 1;
+      }
+    }
+    appendLog("lifecycle", `phone sweep(${reason}) done`, { applied });
+  }
+
+  _agentsDir() {
+    // dataDir = ${HANA_HOME}/plugin-data/<pluginId> → home is two levels up.
+    const dataDir = this._ctx?.dataDir;
+    if (!dataDir) return null;
+    try {
+      return path.resolve(path.dirname(path.dirname(dataDir)), "agents");
+    } catch {
+      return null;
+    }
+  }
+
+  async onunload() {
+    appendLog("lifecycle", "onunload");
+    this.ctx?.log?.info?.("[hana-max-thinking] lifecycle unloaded");
+  }
+}
