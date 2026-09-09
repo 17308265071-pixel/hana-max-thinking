@@ -4,11 +4,16 @@
 
 **作者：2990927961** · Hana 插件市场 ID：`hana-max-thinking`
 
-## 兼容性说明（v0.1.7）
+## 兼容性说明（v0.1.9）
 
 - **HanaAgent ≥ 0.449.0**：`thinking_status` 作为原生工具直接调用（capability 本地命名空间，免审批）。
 - **HanaAgent < 0.449.0**：插件工具可能被延迟挂载到 mcp_call 桥——此时经 `mcp_call { server: "hana-max-thinking", tool: "hana-max-thinking_thinking_status" }` 调用（解析器检测到桥接帧时自动切换目录命名空间 capability）。
 - **任何版本通用的兜底**：直接 read `${HANA_HOME}/plugin-data/hana-max-thinking/enforce.log`（JSONL），运行时真实等级以它为准。SKILL.md 已向 agent 注入这套"直调 → 旧版 mcp_call → 日志兜底"的三段式约定。
+
+## v0.1.9 修复
+
+- **关键回归修复**：v0.1.8 闭包重构时遗漏了 `this._ctx = ctx` 镜像赋值，导致生命周期所有总线操作（元数据 sweep、session_created 即时应用、降级纠正）报 `Cannot read properties of undefined (reading 'bus')`。已恢复赋值并对未激活场景加了防御日志。
+- **stale ctx 兜底**：热重载时忙碌会话跳过扩展重绑（宿主设计），该会话的每轮强制跳过属预期——由恢复后的生命周期 sweep（每 10 分钟全量 + session_created + 降级事件即时纠正）继续兜底，重启 Hana 不是必需的。
 
 ## 解决什么痛点
 
