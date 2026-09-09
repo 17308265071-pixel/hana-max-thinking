@@ -86,6 +86,12 @@ export default class HanaMaxThinkingPlugin {
     const register = (disposable) => {
       if (typeof this.register === "function") this.register(disposable);
     };
+    // The host assigns instance.ctx before onload; instance methods (_applyNow,
+    // _sweep, _agentsDir, ...) resolve the context through this._ctx, so the
+    // mirror MUST be written here — missing this assignment leaves every bus
+    // path (session:update sweeps, event handlers) crashing with
+    // "Cannot read properties of undefined (reading 'bus')".
+    this._ctx = ctx;
     // Closure-scoped runtime state: JSON-safe on the instance (no timers).
     const timers = [];
     let pendingSweepTimer = null;
@@ -182,6 +188,10 @@ export default class HanaMaxThinkingPlugin {
   }
 
   async _applyNow(target, reason, { ignoreThrottle = false } = {}) {
+    if (!this._ctx) {
+      appendLog("lifecycle", "apply skipped: lifecycle ctx unavailable (plugin not fully activated)");
+      return false;
+    }
     const key = target.sessionId || target.sessionPath;
     if (!key) return false;
     if (!ignoreThrottle && (recentlyApplied(key, APPLY_THROTTLE_MS) || isManualHold(String(key)))) return false;
@@ -213,6 +223,10 @@ export default class HanaMaxThinkingPlugin {
 
   async _sweep(reason) {
     const state = getState();
+    if (!this._ctx) {
+      appendLog("lifecycle", `sweep skipped (${reason}): lifecycle ctx unavailable (plugin not fully activated)`);
+      return;
+    }
     if (!state.enabled || !state.syncSessionMeta || this._sweepBusy) return;
     this._sweepBusy = true;
     try {
