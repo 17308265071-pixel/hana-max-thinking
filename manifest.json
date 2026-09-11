@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "hana-max-thinking",
   "name": "Max Thinking",
-  "version": "0.1.9",
+  "version": "0.1.12",
   "description": "Force every chat model in every session and channel (desktop / phone / bridge) to run at its highest supported thinking level. Enforced per turn through the Pi SDK runtime API and synced into session metadata so the frontend thinking selector reflects it immediately.",
   "minAppVersion": "0.158.0",
   "trust": "full-access",
@@ -51,6 +51,11 @@
           },
           "default": [],
           "title": "排除的模型（模型 id 子串匹配，支持结尾 * 作为前缀通配）"
+        },
+        "injectGuide": {
+          "type": "boolean",
+          "default": true,
+          "title": "在系统提示注入插件必读说明（推荐）"
         }
       }
     }

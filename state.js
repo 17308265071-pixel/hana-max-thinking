@@ -26,6 +26,7 @@ let current = {
   syncSessionMeta: true,
   respectManualChoice: false,
   excludeModels: [],
+  injectGuide: true,
 };
 
 const recent = [];
@@ -109,6 +110,25 @@ export function recentlyApplied(key, windowMs = 15_000) {
   return typeof at === "number" && Date.now() - at < windowMs;
 }
 
+// Keys with an apply request currently in flight. The host can emit
+// session_metadata_updated for our own write BEFORE bus.request resolves, so
+// "recentlyApplied" alone leaves a race window: every echo re-triggers an
+// apply and the same session can receive a burst of identical writes
+// (observed: 10 writes in 46ms). Treat in-flight as applied.
+const applying = new Set();
+
+export function beginApply(key) {
+  if (key) applying.add(String(key));
+}
+
+export function endApply(key) {
+  if (key) applying.delete(String(key));
+}
+
+export function isApplying(key) {
+  return !!key && applying.has(String(key));
+}
+
 export function isManualHold(key) {
   if (!key) return false;
   const until = manualUntil.get(String(key));
@@ -160,6 +180,7 @@ export function setState(next) {
     syncSessionMeta: typeof next?.syncSessionMeta === "boolean" ? next.syncSessionMeta : prev.syncSessionMeta,
     respectManualChoice: typeof next?.respectManualChoice === "boolean" ? next.respectManualChoice : prev.respectManualChoice,
     excludeModels: Array.isArray(next?.excludeModels) ? normalizeExcludeModels(next.excludeModels) : prev.excludeModels,
+    injectGuide: typeof next?.injectGuide === "boolean" ? next.injectGuide : prev.injectGuide,
   };
   return current;
 }

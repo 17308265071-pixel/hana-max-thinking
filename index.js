@@ -1,4 +1,4 @@
-// hana-max-thinking lifecycle plugin (v0.1.8).
+// hana-max-thinking lifecycle plugin (v0.1.11).
 //
 // Responsibilities:
 // 1. Sync ctx.config (manifest configuration schema) into the shared state
@@ -24,8 +24,11 @@ import path from "node:path";
 import fs from "node:fs";
 import {
   appendLog,
+  beginApply,
+  endApply,
   getState,
   initLogging,
+  isApplying,
   isManualHold,
   levelBelowTarget,
   markApplied,
@@ -39,6 +42,10 @@ import {
 const BUS_LEVEL = "max";
 const APPLY_THROTTLE_MS = 5 * 60_000;
 const PHONE_THROTTLE_MS = 30 * 60_000;
+// Phone/channel rounds are stored as per-round `时间戳_xxx.jsonl` files (not a
+// single phone.jsonl), so the backstop sweep only touches rounds that changed
+// recently; older history is left alone.
+const PHONE_FRESH_MS = 15 * 60_000;
 const SWEEP_INTERVAL_MS = 10 * 60_000;
 const SWEEP_STARTUP_DELAY_MS = 4_000;
 
@@ -77,6 +84,7 @@ async function readConfig(ctx) {
     syncSessionMeta: await get("syncSessionMeta", true),
     respectManualChoice: await get("respectManualChoice", false),
     excludeModels: await get("excludeModels", []),
+    injectGuide: await get("injectGuide", true),
   };
 }
 
@@ -175,6 +183,7 @@ export default class HanaMaxThinkingPlugin {
       const key = sessionPath || event?.sessionPath || null;
       if (!key) return;
       if (recentlyApplied(key, 15_000)) return; // echo of our own write
+      if (isApplying(key)) return; // echo arrived while our write is in flight
       if (state.respectManualChoice) {
         markManualHold(key);
         appendLog("lifecycle", "manual choice respected (hold 30m)", { session: key, level });
@@ -194,7 +203,9 @@ export default class HanaMaxThinkingPlugin {
     }
     const key = target.sessionId || target.sessionPath;
     if (!key) return false;
+    if (isApplying(key)) return false; // a write for this key is already in flight
     if (!ignoreThrottle && (recentlyApplied(key, APPLY_THROTTLE_MS) || isManualHold(String(key)))) return false;
+    beginApply(key);
     try {
       const payload = { thinkingLevel: BUS_LEVEL };
       if (target.sessionId) {
@@ -205,19 +216,35 @@ export default class HanaMaxThinkingPlugin {
       }
       const result = await this._ctx.bus.request("session:update", payload);
       markApplied([key, result?.sessionId, result?.session?.path]);
-      appendLog("lifecycle", "session:update applied", {
-        session: String(key),
-        level: BUS_LEVEL,
-        reason,
-        ok: result?.ok !== false,
-      });
-      return true;
+      // The host shell always answers ok:true; the truth is whether it could
+      // resolve a loaded session for the path. Hub-run phone sessions are not
+      // engine-managed on 0.449.0, so the update is a silent no-op for them —
+      // log that honestly instead of claiming success (phone channels are
+      // enforced by the per-turn extension; this sweep is best-effort).
+      const effective = result?.ok !== false && (result?.session != null || result?.sessionId != null);
+      if (effective) {
+        appendLog("lifecycle", "session:update applied", {
+          session: String(key),
+          level: BUS_LEVEL,
+          reason,
+          ok: true,
+        });
+      } else {
+        appendLog("lifecycle", "session:update ineffective: host has no loaded session for this path", {
+          session: String(key),
+          level: BUS_LEVEL,
+          reason,
+        });
+      }
+      return effective;
     } catch (err) {
       appendLog("lifecycle", `session:update failed (${reason})`, {
         session: String(key),
         error: err?.message || String(err),
       });
       return false;
+    } finally {
+      endApply(key);
     }
   }
 
@@ -258,7 +285,7 @@ export default class HanaMaxThinkingPlugin {
       const sessionId = item?.sessionId || null;
       const sessionPath = item?.path || item?.sessionPath || null;
       if (!sessionId && !sessionPath) continue;
-      if (recentlyApplied(sessionId || sessionPath, APPLY_THROTTLE_MS)) continue;
+      if (recentlyApplied(sessionId || sessionPath, APPLY_THROTTLE_MS) || isApplying(sessionId || sessionPath)) continue;
       if (isManualHold(String(sessionId || sessionPath))) continue;
       const target = sessionId ? { sessionId } : { sessionPath };
       const ok = await this._applyNow(target, reason);
@@ -297,11 +324,26 @@ export default class HanaMaxThinkingPlugin {
         continue; // agent without phone sessions
       }
       for (const convDir of convDirs) {
-        const phoneJsonl = path.join(convDir, "phone.jsonl");
-        if (!fileExistsSafe(phoneJsonl)) continue;
-        if (recentlyApplied(phoneJsonl, PHONE_THROTTLE_MS)) continue;
-        const ok = await this._applyNow({ sessionPath: phoneJsonl }, "phone");
-        if (ok) applied += 1;
+        let roundFiles;
+        try {
+          roundFiles = fs.readdirSync(convDir, { withFileTypes: true })
+            .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+            .map((entry) => path.join(convDir, entry.name));
+        } catch {
+          continue;
+        }
+        for (const roundFile of roundFiles) {
+          let mtimeMs = 0;
+          try {
+            mtimeMs = fs.statSync(roundFile).mtimeMs;
+          } catch {
+            continue;
+          }
+          if (Date.now() - mtimeMs > PHONE_FRESH_MS) continue;
+          if (recentlyApplied(roundFile, PHONE_THROTTLE_MS) || isApplying(roundFile)) continue;
+          const ok = await this._applyNow({ sessionPath: roundFile }, "phone");
+          if (ok) applied += 1;
+        }
       }
     }
     appendLog("lifecycle", `phone sweep(${reason}) done`, { applied });
