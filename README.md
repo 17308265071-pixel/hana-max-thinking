@@ -4,6 +4,12 @@
 
 **作者：2990927961** · Hana 插件市场 ID：`hana-max-thinking`
 
+## v0.2.0 修复（0.449 覆盖安装失败）
+
+- **现象**：运行中的 Hana 里直接安装新版本 zip 报 `插件安装失败: The requested module './state.js' does not provide an export named 'beginApply'`。
+- **根因**：宿主进程在整个生命周期内缓存 ESM 模块实例；旧版 `index.js` 用静态 `import "./state.js"` 载入，覆盖安装后解析到的仍是**旧 state.js**（没有新导出），入口加载失败。
+- **修复**：与极简模式同样的 **cache-busting 版本化动态导入**——`index.js`、`extensions/max-thinking.js`、`tools/thinking-status.js` 全部改为 `await import(new URL("./state.js?v=" + MODULE_VERSION, import.meta.url).href)`，每个版本拥有独立模块图，覆盖安装/热重载不再撞缓存；新增版本一致性回归测试（MODULE_VERSION 三处 == manifest.version）。
+
 ## v0.1.12 新增（插件必读说明注入）
 
 - **问题**：频道实测（ch_0434b9）证明"指望模型自觉去读 skill/文档"不可靠——工具描述与 skill 描述里的关键约定（如"勿经 mcp_call"）都会被模型忽略。

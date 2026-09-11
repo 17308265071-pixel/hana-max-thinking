@@ -1,4 +1,4 @@
-// hana-max-thinking lifecycle plugin (v0.1.11).
+// hana-max-thinking lifecycle plugin (v0.2.0).
 //
 // Responsibilities:
 // 1. Sync ctx.config (manifest configuration schema) into the shared state
@@ -22,7 +22,15 @@
 
 import path from "node:path";
 import fs from "node:fs";
-import {
+
+// Versioned dynamic import (cache-busting): Hana keeps ESM module instances
+// cached for the lifetime of the process, so after an in-place plugin update a
+// static `import "./state.js"` resolves to the OLD module and an entry that
+// uses new exports fails to load ("does not provide an export named ...",
+// observed on 449 with beginApply). The ?v= query gives every release its own
+// module graph, so updates install cleanly without a host restart.
+const MODULE_VERSION = "0.2.0";
+const {
   appendLog,
   beginApply,
   endApply,
@@ -35,7 +43,7 @@ import {
   markManualHold,
   recentlyApplied,
   setState,
-} from "./state.js";
+} = await import(new URL("./state.js?v=" + MODULE_VERSION, import.meta.url).href);
 
 // The level sent over the bus. Hana normalizes it per model on the server
 // (max -> xhigh -> high when the model lacks a higher tier).

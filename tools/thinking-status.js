@@ -1,6 +1,9 @@
 // Agent-callable tool: thinking_status (read-only diagnostics).
 import fs from "node:fs";
-import { getState, getDiagnostics, getLogFile } from "../state.js";
+
+// Versioned dynamic import (cache-busting): see index.js.
+const MODULE_VERSION = "0.2.0";
+const { getState, getDiagnostics, getLogFile } = await import(new URL("../state.js?v=" + MODULE_VERSION, import.meta.url).href);
 
 export const name = "thinking_status";
 export const description = "hana-max-thinking 插件状态查询：报告思考等级强制配置、degraded 状态、最近按会话的等级应用记录（before→after）与文件日志尾部。HanaAgent >= 0.449 直接作为原生工具调用（无参数）；旧版本 < 0.449 可经 mcp_call { server: \"hana-max-thinking\", tool: \"hana-max-thinking_thinking_status\" } 调用；均失败则读 plugin-data/hana-max-thinking/enforce.log。当用户询问思考等级 / thinking level / 推理档位 / Max / 深度推理状态时调用本工具。";

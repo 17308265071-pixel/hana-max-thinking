@@ -15,13 +15,17 @@
 // desktop sessions, phone/channel sessions (hub agent-executor), and bridge
 // sessions all load the same ResourceLoader extension array.
 
-import {
+// Versioned dynamic import (cache-busting): see index.js. A static import of
+// ../state.js would bind this extension to the module instance cached by the
+// running host process, breaking in-place plugin updates.
+const MODULE_VERSION = "0.2.0";
+const {
   appendLog,
   clearDegraded,
   getState,
   markDegraded,
   recordEnforcement,
-} from "../state.js";
+} = await import(new URL("../state.js?v=" + MODULE_VERSION, import.meta.url).href);
 
 const TARGET_LEVELS = new Set(["xhigh", "high"]);
 
